@@ -322,13 +322,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("-d", "--dry", help="Don't make any edits", action="store_true")
     parser.add_argument("-v", "--verbose", help="Be verbose", action="store_true")
-    parser.add_argument("--debug", help="Set log level to DEBUG", action="store_true")
+    parser.add_argument(
+        "--debug", help="Set log level to DEBUG, write logs etc.", action="store_true"
+    )
     parser.add_argument(
         "-l",
         "--limit",
-        help="Limit the number of deployments to modify",
+        help="Limit the number of deployments to modify (default: 60)",
         type=int,
         default=60,
+        metavar="60",
     )
     parser.add_argument(
         "--id",
@@ -337,7 +340,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--page",
-        help="Use a different page for deployments",
+        help=f"Use a different page for deployments (default: {config.DEPLOYMENT_PAGE})",
         type=str,
         default=config.DEPLOYMENT_PAGE,
     )
