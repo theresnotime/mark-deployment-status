@@ -1,3 +1,8 @@
 .tox/
 venv/
 .vscode/
+config.py
+logs/*.txt
+__pycache__/
+.pytest_cache/
+.mypy_cache/
