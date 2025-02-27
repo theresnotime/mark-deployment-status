@@ -100,12 +100,20 @@ def update_deployment_status(
             return False
         was_deployed = did_change_get_deployed(gerrit_id, deployment_title)
         if not was_deployed:
+            # If the status was DONE (set by a person, probably), but we can't find it in the SAL
+            # then we can't trust that it was actually done.
+
+            # TODO: Remove this or put it behind a feature flag
+            # log.info(
+            #    f"[{gerrit_id}]: Cannot find this deployment in the SAL, marking as unknown status."
+            # )
+            # updated_deployment = re.sub(
+            #    r"status=.*?(\||}})", "status=unknown\\1", deployment
+            # )
             log.info(
-                f"[{gerrit_id}]: Cannot find this deployment in the SAL, marking as unknown status."
+                f'[{gerrit_id}]: Cannot find this deployment in the SAL, but trusting that it was "done".'
             )
-            updated_deployment = re.sub(
-                r"status=.*?(\||}})", "status=unknown\\1", deployment
-            )
+            updated_deployment = deployment
             return updated_deployment
         else:
             updated_deployment = re.sub(
