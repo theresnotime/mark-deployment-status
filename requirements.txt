@@ -1,4 +1,4 @@
-requests==2.32.2
+requests==2.32.3
 pwiki==1.2.0
 mypy==1.13.0
 types-requests==2.32.0.20241016
