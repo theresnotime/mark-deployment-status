@@ -26,7 +26,10 @@ re_get_deployments = re.compile(r"{{deploy\|.*?}}", re.IGNORECASE)
 
 def get_change_status(change_id: str) -> None | str:
     """Get the status of a Gerrit change"""
-    headers = {"Accept": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": config.USER_AGENT,
+    }
     resp = requests.get(
         f"https://gerrit.wikimedia.org/r/changes/{change_id}",
         headers=headers,
@@ -48,9 +51,13 @@ def get_sal_entry_regex(title: str, gerrit_id: str) -> re.Pattern:
 
 def did_change_get_deployed(gerrit_id: str, title: str) -> bool | re.Match[str]:
     """Find out if a change was deployed by checking the SAL on toolforge"""
+    headers = {
+        "User-Agent": config.USER_AGENT,
+    }
     # https://sal.toolforge.org/production?p=0&q=&d=
     sal_content = requests.get(
-        f"https://sal.toolforge.org/production?p=0&q={gerrit_id}&d="
+        f"https://sal.toolforge.org/production?p=0&q={gerrit_id}&d=",
+        headers=headers,
     ).text
     in_log = get_sal_entry_regex(title, gerrit_id).search(sal_content)
     if in_log is not None:
@@ -230,6 +237,7 @@ def check_deployments(page_content: str) -> None:
     seen_gerrit_ids = []
     limit = args.limit
     count = 0
+    # We start from the most recent deployments, hence the `reversed`
     for deployment in reversed(all_deployments):
         if count >= limit:
             break
@@ -257,6 +265,9 @@ def check_deployments(page_content: str) -> None:
         # Check if we've already seen this Gerrit ID
         if gerrit_id in seen_gerrit_ids:
             log.error(f"[{gerrit_id}]: Duplicate Gerrit ID found?!")
+            if args.ignore_duplicates:
+                log.info(f"[{gerrit_id}]: Ignoring duplicate Gerrit ID")
+                continue
             # TODO: Handle this maybe?
             pass
         seen_gerrit_ids.append(gerrit_id)
@@ -294,6 +305,9 @@ def check_deployments(page_content: str) -> None:
     if len(deployments_to_update) > 0:
         log.info(f"Found {len(deployments_to_update)} deployments to update")
         new_page_content = page_content
+        edit_summary = f"{config.EDIT_SUMMARY} ({len(deployments_to_update)})"
+        if args.verbose:
+            log.info(f"Edit summary: {edit_summary}")
         for deployment in deployments_to_update:
             if args.verbose:
                 log.info(
@@ -307,7 +321,7 @@ def check_deployments(page_content: str) -> None:
             wiki.edit(
                 title=config.DEPLOYMENT_PAGE,
                 text=new_page_content,
-                summary="[supervised test] Updating deployment status",
+                summary=edit_summary,
                 minor=True,
             )
         if args.debug:
@@ -351,6 +365,9 @@ if __name__ == "__main__":
         help=f"Use a different page for deployments (default: {config.DEPLOYMENT_PAGE})",
         type=str,
         default=config.DEPLOYMENT_PAGE,
+    )
+    parser.add_argument(
+        "--ignore-duplicates", help="Ignore duplicate Gerrit IDs", action="store_true"
     )
     args = parser.parse_args()
     if args.debug:
