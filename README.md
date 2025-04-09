@@ -17,7 +17,7 @@ USER_AGENT = (
 ```
 
 ## TODOs
-### Handle unknown state ([TODO](https://github.com/theresnotime/mark-deployment-status/blob/main/mark_deployment_status.py#L109-L124))
+### Handle unknown state
 ```python
 if not was_deployed:
     # If the status was DONE (set by a person, probably), but we can't find it in the SAL
@@ -38,7 +38,7 @@ if not was_deployed:
     return updated_deployment
 ```
 
-### Handle duplicate Gerrit IDs ([TODO](https://github.com/theresnotime/mark-deployment-status/blob/main/mark_deployment_status.py#L265-L273))
+### Handle duplicate Gerrit IDs
 ```python
 # Check if we've already seen this Gerrit ID
 if gerrit_id in seen_gerrit_ids:
@@ -49,4 +49,30 @@ if gerrit_id in seen_gerrit_ids:
     # TODO: Handle this maybe?
     pass
 seen_gerrit_ids.append(gerrit_id)
+```
+
+### Remove unneeded `count` variable
+```python
+# TODO: `count` here could just be `len(deployments_to_update)`, right..?
+deployments_to_update, count = handle_reported_status(
+    reported_status,
+    deployment,
+    actual_status,
+    gerrit_id,
+    page_content,
+    deployments_to_update,
+    count,
+)
+```
+
+### Update after normalisation
+```python
+normalised_deployment = normalise_deployment_status(deployment)
+if normalised_deployment != deployment:
+    count += 1
+    log.info(f"[{gerrit_id}]: Deployment status will be normalised.")
+    # TODO: If it gets normalised, we should check if it needs updating
+    deployments_to_update[deployment] = normalised_deployment
+else:
+    log.info(f"[{gerrit_id}]: No normalisation needed.")
 ```

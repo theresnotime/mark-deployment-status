@@ -183,7 +183,6 @@ def handle_reported_status(
             else:
                 log.debug(f"[{gerrit_id}]: No changes needed.")
     elif reported_status == "done":
-        count += 1
         log.info(
             f"[{gerrit_id}]: Reported status is DONE — checking if it needs updating..."
         )
@@ -199,6 +198,7 @@ def handle_reported_status(
             )
             if isinstance(updated_deployment, str):
                 if updated_deployment != deployment:
+                    count += 1
                     deployments_to_update[deployment] = updated_deployment
                 else:
                     log.debug(f"[{gerrit_id}]: No changes needed.")
@@ -223,6 +223,7 @@ def handle_reported_status(
         if normalised_deployment != deployment:
             count += 1
             log.info(f"[{gerrit_id}]: Deployment status will be normalised.")
+            # TODO: If it gets normalised, we should check if it needs updating
             deployments_to_update[deployment] = normalised_deployment
         else:
             log.info(f"[{gerrit_id}]: No normalisation needed.")
@@ -291,6 +292,7 @@ def check_deployments(page_content: str) -> None:
             )
             continue
 
+        # TODO: `count` here could just be `len(deployments_to_update)`, right..?
         deployments_to_update, count = handle_reported_status(
             reported_status,
             deployment,
@@ -300,6 +302,10 @@ def check_deployments(page_content: str) -> None:
             deployments_to_update,
             count,
         )
+        if args.verbose:
+            log.debug(
+                f"len(deployments_to_update): {len(deployments_to_update)} ({count})"
+            )
         print()
     print()
     if len(deployments_to_update) > 0:
