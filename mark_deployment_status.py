@@ -1,8 +1,10 @@
 import argparse
 import Backports
 import config
+import constants
 import json
 import logging
+import random
 import re
 import requests
 import sys
@@ -14,10 +16,9 @@ formatter = logging.Formatter("[%(asctime)s] [%(name)s] [%(levelname)s]: %(messa
 log.addHandler(logging.StreamHandler(sys.stdout))
 log.handlers[0].setFormatter(formatter)
 
-
-# get https://gerrit.wikimedia.org/r/changes/1069293
+# Log in to the wiki
 try:
-    wiki = Wiki("wikitech.wikimedia.org", "TNTBot", config.TNT_BOT_PASS)
+    wiki = Wiki(constants.WIKITECH_WIKI, config.BOT_USERNAME, config.BOT_PASS)
 except Exception as e:
     log.error(e)
     exit(1)
@@ -31,7 +32,7 @@ def get_change_status(change_id: str) -> None | str:
         "User-Agent": config.USER_AGENT,
     }
     resp = requests.get(
-        f"https://gerrit.wikimedia.org/r/changes/{change_id}",
+        f"https://{constants.GERRIT_URL}/r/changes/{change_id}",
         headers=headers,
     )
     if resp.status_code != 200:
@@ -54,9 +55,8 @@ def did_change_get_deployed(gerrit_id: str, title: str) -> bool | re.Match[str]:
     headers = {
         "User-Agent": config.USER_AGENT,
     }
-    # https://sal.toolforge.org/production?p=0&q=&d=
     sal_content = requests.get(
-        f"https://sal.toolforge.org/production?p=0&q={gerrit_id}&d=",
+        f"https://{constants.SAL_URL}/production?p=0&q={gerrit_id}&d=",
         headers=headers,
     ).text
     in_log = get_sal_entry_regex(title, gerrit_id).search(sal_content)
@@ -74,6 +74,24 @@ def map_deployment_status(actual_status: str) -> None | str:
     elif actual_status == "MERGED":
         new_status = "done"
     return new_status
+
+
+def get_quirky_message() -> str | bool:
+    """Get a quirky message"""
+    try:
+        with open("quirky.json", "r") as f:
+            data = json.load(f)
+        if len(data) == 0:
+            log.error("quirky.json is empty")
+            return False
+        message = random.choice(data)
+        return message
+    except json.JSONDecodeError:
+        log.error("quirky.json is not valid JSON")
+        return False
+    except FileNotFoundError:
+        log.error("quirky.json not found")
+        return False
 
 
 def update_deployment_status(
@@ -138,8 +156,8 @@ def update_deployment_status(
 
                 # Unused atm
                 deployment_time = was_deployed.group("deployed_at")  # noqa: F841
-                deployment_sal_link = "https://sal.toolforge.org" + was_deployed.group(
-                    "sal_link"
+                deployment_sal_link = (
+                    f"https://{constants.SAL_URL}" + was_deployed.group("sal_link")
                 )
                 updated_deployment = re.sub(
                     r"status=done",
@@ -346,13 +364,22 @@ def main() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="mark-deployment-status.py",
-        description="",
+        description=constants.DESCRIPTION,
     )
+    # bool args
     parser.add_argument("-d", "--dry", help="Don't make any edits", action="store_true")
     parser.add_argument("-v", "--verbose", help="Be verbose", action="store_true")
     parser.add_argument(
+        "--quirky", help="Kinda quirky feature to be honest...", action="store_true"
+    )
+    parser.add_argument("--version", help="Version & source info", action="store_true")
+    parser.add_argument(
+        "--ignore-duplicates", help="Ignore duplicate Gerrit IDs", action="store_true"
+    )
+    parser.add_argument(
         "--debug", help="Set log level to DEBUG, write logs etc.", action="store_true"
     )
+    # input args
     parser.add_argument(
         "-l",
         "--limit",
@@ -373,19 +400,51 @@ if __name__ == "__main__":
         default=config.DEPLOYMENT_PAGE,
     )
     parser.add_argument(
-        "--ignore-duplicates", help="Ignore duplicate Gerrit IDs", action="store_true"
+        "--copy-for-testing",
+        help=f"Copy the content of {config.DEPLOYMENT_PAGE} to the page provided (really only useful for testing)",
+        type=str,
+        metavar="PAGE",
     )
     args = parser.parse_args()
+
+    # Logging levels
     if args.debug:
         log.setLevel(logging.DEBUG)
     else:
         log.setLevel(logging.INFO)
+
+    if args.quirky:
+        message = get_quirky_message()
+        if message:
+            print(message)
+        else:
+            print("We're all out of quirky messages")
+        sys.exit(0)
+    if args.version:
+        print(constants.VERSION_STRING)
+        sys.exit(0)
     if args.dry:
         log.info("Running in dry mode, no edits will be made.")
+    if args.copy_for_testing:
+        log.info(
+            f"Copying content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}"
+        )
+        page_content = wiki.page_text(config.DEPLOYMENT_PAGE)
+        # Remove the category
+        page_content = page_content.replace("[[Category:Deployment]]", "")
+        if args.dry is False and page_content:
+            wiki.edit(
+                title=args.copy_for_testing,
+                text=page_content,
+                summary=f"Copying content of {config.DEPLOYMENT_PAGE} for testing",
+            )
+        else:
+            log.info("Either dry run, or page content is empty.")
+        sys.exit(0)
     if args.id:
         log.info(f"Checking deployment with Gerrit ID {args.id} only")
     if args.page != config.DEPLOYMENT_PAGE:
         config.DEPLOYMENT_PAGE = args.page
         log.debug(f"Using page {config.DEPLOYMENT_PAGE} for deployments")
-    log.debug(f"Limiting to checking {args.limit} deployments")
+    log.debug(f"Limiting to updating {args.limit} deployments")
     main()
