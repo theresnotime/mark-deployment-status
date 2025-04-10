@@ -6,3 +6,4 @@ USER_AGENT = (
     "TNTBot (https://meta.wikimedia.org/wiki/User:TNTBot) - mark-deployment-status"
 )
 COOKIE_JAR = "./.cookie_store"
+FEATURE_FLAGS = {"USE_DEPLOYMENT_EVENT_TEMPLATE": False, "USE_UNKNOWN_STATUS": False}

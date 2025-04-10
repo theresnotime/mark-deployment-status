@@ -1,6 +1,6 @@
 DESCRIPTION = "Script to mark deployment statuses on wikitech"
 SOURCE = "https://github.com/theresnotime/mark-deployment-status"
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 VERSION_STRING = f"{DESCRIPTION}\nv{__version__} ({SOURCE})"
 WIKITECH_WIKI = "wikitech.wikimedia.org"
 GERRIT_URL = "gerrit.wikimedia.org"

@@ -31,6 +31,11 @@ except Exception as e:
     log.error(e)
     exit(1)
 re_get_deployments = re.compile(r"{{deploy\|.*?}}", re.IGNORECASE)
+# re_get_deployment_events = re.compile(r"(?<={{Deployment calendar event card).*?\|when=(?P<when>.*?)\n.*?\|what=(?P<what>.*?)\n}}", re.IGNORECASE | re.DOTALL)
+re_get_deployment_events = re.compile(
+    r"(?<={{Deployment calendar event card).*?\|when=(?P<when>.*?)\n.*?\|window=(.*?)\n.*?\|what=(?P<what>.*?)\n}}",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def get_change_status(change_id: str) -> None | str:
@@ -146,6 +151,10 @@ def update_deployment_status(
             log.info(
                 f'[{gerrit_id}]: Cannot find this deployment in the SAL, but trusting that it was "done".'
             )
+            if args.log_to_wiki:
+                log_to_wiki(
+                    f"While checking the SAL, I couldn't find the deployment for [[gerrit:{gerrit_id}|{gerrit_id}]], but trusting that it was done."
+                )
             updated_deployment = deployment
             return updated_deployment
         else:
@@ -320,9 +329,45 @@ def log_to_wiki(message: str) -> None:
             )
 
 
+def get_all_deployments(page_content: str) -> tuple[list[str], dict[str, str]]:
+    """Get all deployments from the page content"""
+    all_deployments = []
+    deployment_date_lookup = {}
+
+    # Feature flag for using event templates instead
+    if config.FEATURE_FLAGS["USE_DEPLOYMENT_EVENT_TEMPLATE"]:
+        all_deployment_events = re_get_deployment_events.findall(page_content)
+        for event in reversed(all_deployment_events):
+            event_when = str(event[0])
+            event_window = event[1]
+            event_what = event[2]
+            # We only care about backports
+            if "backport" in event_window.lower():
+                event_deployments = re_get_deployments.findall(event_what)
+                for deployment in event_deployments:
+                    deployment_obj = Backports.Deployment(deployment)
+                    gerrit_id = deployment_obj.gerrit_id
+                    if gerrit_id:
+                        all_deployments.append(deployment)
+                        if gerrit_id in deployment_date_lookup:
+                            log.error(
+                                f"Duplicate gerrit id found: {gerrit_id} for {deployment}"
+                            )
+                        else:
+                            deployment_date_lookup[gerrit_id] = event_when[:10]
+                    else:
+                        log.info(f"Missing gerrit id for {deployment}")
+    else:
+        all_deployments = re_get_deployments.findall(page_content)
+    return all_deployments, deployment_date_lookup
+
+
 def check_deployments(page_content: str) -> None:
     """Check deployments and update status if needed"""
-    all_deployments = re_get_deployments.findall(page_content)
+    all_deployments, deployment_date_lookup = get_all_deployments(page_content)
+    if len(all_deployments) == 0:
+        log.info("No deployments found, exiting...")
+        return
     log.info(
         f"Found {len(all_deployments)} total deployments on {config.DEPLOYMENT_PAGE}"
     )
@@ -330,9 +375,6 @@ def check_deployments(page_content: str) -> None:
         log_to_wiki(
             f"Found {len(all_deployments)} total deployments on [[{config.DEPLOYMENT_PAGE}]]"
         )
-    if len(all_deployments) == 0:
-        log.info("No deployments found, exiting...")
-        return
     deployments_to_update: dict[str, str] = {}
     seen_gerrit_ids = []
     limit = args.limit
@@ -361,6 +403,13 @@ def check_deployments(page_content: str) -> None:
 
         if args.id and int(gerrit_id) != args.id:
             continue
+
+        if (
+            config.FEATURE_FLAGS["USE_DEPLOYMENT_EVENT_TEMPLATE"]
+            and len(deployment_date_lookup) > 0
+        ):
+            # TODO: Not in use yet..
+            deployment_date = deployment_date_lookup.get(gerrit_id)  # noqa: F841
 
         # Check if we've already seen this Gerrit ID
         if gerrit_id in seen_gerrit_ids:
@@ -546,8 +595,6 @@ if __name__ == "__main__":
         log.info("Clearing cookies...")
         wiki.clear_cookies()
         sys.exit(0)
-    if args.dry:
-        log.info("Running in dry mode, no edits will be made.")
     if args.copy_for_testing:
         log.info(
             f"Copying content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}..."
@@ -562,6 +609,8 @@ if __name__ == "__main__":
                 f"Failed to copy the content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}"
             )
         sys.exit(0)
+    if args.dry:
+        log.info("Running in dry mode, no edits will be made.")
     if args.id:
         log.info(f"Checking deployment with Gerrit ID {args.id} only")
     if args.page != config.DEPLOYMENT_PAGE:
@@ -578,5 +627,11 @@ if __name__ == "__main__":
                 text="Log page for mark-deployment-status.py\n\n",
                 summary="Creating log page",
             )
+    if args.verbose:
+        log.info("Verbose mode enabled")
+        # Print feature flags
+        log.info("Feature flags:")
+        for feature, enabled in config.FEATURE_FLAGS.items():
+            log.info(f"\t{feature}: {enabled}")
     log.debug(f"Limiting to updating {args.limit} deployments")
     main()
