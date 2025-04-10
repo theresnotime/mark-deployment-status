@@ -6,8 +6,9 @@ A bot task which:
 - link the deployment item to said SAL entry
 
 ## Config
+### config.py
 Copy `config.example.py` to `config.py` and fill out the details:
-```
+```python
 BOT_USERNAME = "TNTBot"
 BOT_PASS = ""
 DEPLOYMENT_PAGE = "Deployments"
@@ -15,6 +16,18 @@ EDIT_SUMMARY = "[[User:TNTBot#Updating_backport_window_deployment_statuses|Autom
 USER_AGENT = (
     "TNTBot (https://meta.wikimedia.org/wiki/User:TNTBot) - mark-deployment-status"
 )
+COOKIE_JAR = "./.cookie_store"
+```
+### constants.py
+Some stuff is *also* defined in `constants.py`, but they probably don't need to be changed.
+```python
+DESCRIPTION = "Script to mark deployment statuses on wikitech"
+SOURCE = "https://github.com/theresnotime/mark-deployment-status"
+__version__ = "0.1.0"
+VERSION_STRING = f"{DESCRIPTION}\nv{__version__} ({SOURCE})"
+WIKITECH_WIKI = "wikitech.wikimedia.org"
+GERRIT_URL = "gerrit.wikimedia.org"
+SAL_URL = "sal.toolforge.org"
 ```
 
 ## TODOs
@@ -64,16 +77,4 @@ deployments_to_update, count = handle_reported_status(
     deployments_to_update,
     count,
 )
-```
-
-### Update after normalisation
-```python
-normalised_deployment = normalise_deployment_status(deployment)
-if normalised_deployment != deployment:
-    count += 1
-    log.info(f"[{gerrit_id}]: Deployment status will be normalised.")
-    # TODO: If it gets normalised, we should check if it needs updating
-    deployments_to_update[deployment] = normalised_deployment
-else:
-    log.info(f"[{gerrit_id}]: No normalisation needed.")
 ```

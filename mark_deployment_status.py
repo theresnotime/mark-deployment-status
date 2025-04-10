@@ -2,6 +2,7 @@ import argparse
 import Backports
 import config
 import constants
+import datetime
 import json
 import logging
 import random
@@ -249,7 +250,24 @@ def handle_reported_status(
             count += 1
             log.info(f"[{gerrit_id}]: Deployment status will be normalised.")
             # TODO: If it gets normalised, we should check if it needs updating
-            deployments_to_update[deployment] = normalised_deployment
+            log.info(
+                f"[{gerrit_id}]: Now checking if it needs updating after normalisation..."
+            )
+            updated_deployment = update_deployment_status(
+                page_content, normalised_deployment, actual_status, reported_status
+            )
+            if isinstance(updated_deployment, str):
+                if updated_deployment != normalised_deployment:
+                    deployments_to_update[deployment] = updated_deployment
+                    log.info(
+                        f"[{gerrit_id}]: Some changes needed — will normalise and update."
+                    )
+                else:
+                    deployments_to_update[deployment] = normalised_deployment
+                    log.info(f"[{gerrit_id}]: No changes needed — will just normalise.")
+            else:
+                deployments_to_update[deployment] = normalised_deployment
+                log.info(f"[{gerrit_id}]: No changes needed — will just normalise.")
         else:
             log.info(f"[{gerrit_id}]: No normalisation needed.")
     return deployments_to_update, count
@@ -284,10 +302,37 @@ def copy_for_testing(copy_from, copy_to) -> bool:
         return False
 
 
+def log_to_wiki(message: str) -> None:
+    """Log a message to the wiki"""
+    log_page = (
+        f"User:{config.BOT_USERNAME}/mark-deployment-status/{config.DEPLOYMENT_PAGE}"
+    )
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if args.log_to_wiki:
+        log.info(f"Logging message to {log_page}")
+        log.debug(f"Message: * [{timestamp}]: {message}")
+        if args.dry is False:
+            wiki.edit(
+                title=log_page,
+                append=f"\n* [{timestamp}]: {message}",
+                summary="Logging message",
+                minor=True,
+            )
+
+
 def check_deployments(page_content: str) -> None:
     """Check deployments and update status if needed"""
     all_deployments = re_get_deployments.findall(page_content)
-    log.info(f"Found {len(all_deployments)} deployments")
+    log.info(
+        f"Found {len(all_deployments)} total deployments on {config.DEPLOYMENT_PAGE}"
+    )
+    if args.log_to_wiki:
+        log_to_wiki(
+            f"Found {len(all_deployments)} total deployments on [[{config.DEPLOYMENT_PAGE}]]"
+        )
+    if len(all_deployments) == 0:
+        log.info("No deployments found, exiting...")
+        return
     deployments_to_update: dict[str, str] = {}
     seen_gerrit_ids = []
     limit = args.limit
@@ -364,8 +409,15 @@ def check_deployments(page_content: str) -> None:
     print()
     if len(deployments_to_update) > 0:
         log.info(f"Found {len(deployments_to_update)} deployments to update")
+        if args.log_to_wiki:
+            log_message = f"Out of {len(all_deployments)} total deployments on [[{config.DEPLOYMENT_PAGE}]], there are {len(deployments_to_update)} deployments (limited to {args.limit} changes) to update"
+            if args.id:
+                log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+            log_to_wiki(log_message)
         new_page_content = page_content
-        edit_summary = f"{config.EDIT_SUMMARY} ({len(deployments_to_update)})"
+        edit_summary = f"{config.EDIT_SUMMARY} [t:{len(all_deployments)}/u:{len(deployments_to_update)}/l:{args.limit}]"
+        if args.id:
+            edit_summary += f" (change ID: [[gerrit:{args.id}|{args.id}]])"
         if args.verbose:
             log.info(f"Edit summary: {edit_summary}")
         for deployment in deployments_to_update:
@@ -378,12 +430,26 @@ def check_deployments(page_content: str) -> None:
             )
         if args.dry is False and new_page_content != page_content:
             log.info("Updating page...")
-            wiki.edit(
+            edit_result = wiki.edit(
                 title=config.DEPLOYMENT_PAGE,
                 text=new_page_content,
                 summary=edit_summary,
                 minor=True,
             )
+            if edit_result:
+                log.info("Page updated successfully")
+                if args.log_to_wiki:
+                    log_message = f'<span style="color:green;">Successfully</span> updated {len(deployments_to_update)} deployments (limited to {args.limit} changes) on [[{config.DEPLOYMENT_PAGE}]]'  # noqa: E702
+                    if args.id:
+                        log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+                    log_to_wiki(log_message)
+            else:
+                log.error("Failed to update page")
+                if args.log_to_wiki:
+                    log_message = f'<span style="color:red;">Failed</span> to update {len(deployments_to_update)} deployments (limited to {args.limit} changes) on [[{config.DEPLOYMENT_PAGE}]]'  # noqa: E702
+                    if args.id:
+                        log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+                    log_to_wiki(log_message)
         if args.debug:
             with open("logs/deployments.txt", "w") as f:
                 f.write(page_content)
@@ -393,8 +459,16 @@ def check_deployments(page_content: str) -> None:
 
 def main() -> None:
     log.info(f"Getting deployments from {config.DEPLOYMENT_PAGE}...")
+    if args.log_to_wiki:
+        log_message = f"'''Beginning''' run for [[{config.DEPLOYMENT_PAGE}]] (limited to {args.limit} changes)"
+        if args.id:
+            log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+        log_to_wiki(log_message)
     page_content = wiki.page_text(config.DEPLOYMENT_PAGE)
     check_deployments(page_content)
+    if args.log_to_wiki:
+        log_message = f"'''Run completed''' for [[{config.DEPLOYMENT_PAGE}]] (limited to {args.limit} changes)"
+        log_to_wiki(log_message)
 
 
 if __name__ == "__main__":
@@ -416,6 +490,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--debug", help="Set log level to DEBUG, write logs etc.", action="store_true"
+    )
+    parser.add_argument(
+        "--log-to-wiki", help="Log runs to a subpage", action="store_true"
     )
     # input args
     parser.add_argument(
@@ -490,5 +567,16 @@ if __name__ == "__main__":
     if args.page != config.DEPLOYMENT_PAGE:
         config.DEPLOYMENT_PAGE = args.page
         log.debug(f"Using page {config.DEPLOYMENT_PAGE} for deployments")
+    if args.log_to_wiki:
+        log_page = f"User:{config.BOT_USERNAME}/mark-deployment-status/{config.DEPLOYMENT_PAGE}"
+        log.info(f"Logging runs to {log_page}")
+        log_page_exists = wiki.exists(log_page)
+        if not log_page_exists:
+            log.info("Creating log page...")
+            wiki.edit(
+                title=log_page,
+                text="Log page for mark-deployment-status.py\n\n",
+                summary="Creating log page",
+            )
     log.debug(f"Limiting to updating {args.limit} deployments")
     main()
