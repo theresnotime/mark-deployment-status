@@ -8,6 +8,7 @@ import random
 import re
 import requests
 import sys
+from pathlib import Path
 from pwiki.wiki import Wiki  # type: ignore
 
 args = argparse.Namespace(dry=False, verbose=False)
@@ -18,7 +19,13 @@ log.handlers[0].setFormatter(formatter)
 
 # Log in to the wiki
 try:
-    wiki = Wiki(constants.WIKITECH_WIKI, config.BOT_USERNAME, config.BOT_PASS)
+    wiki = Wiki(
+        constants.WIKITECH_WIKI,
+        config.BOT_USERNAME,
+        config.BOT_PASS,
+        cookie_jar=Path(config.COOKIE_JAR),
+    )
+    wiki.save_cookies()
 except Exception as e:
     log.error(e)
     exit(1)
@@ -248,6 +255,35 @@ def handle_reported_status(
     return deployments_to_update, count
 
 
+def copy_for_testing(copy_from, copy_to) -> bool:
+    """Copy the content of a page to another page for testing purposes"""
+    # Check if the page exists
+    if wiki.exists(copy_from) is False:
+        log.error(f"Page {copy_from} does not exist")
+        return False
+    # Ask the user if they want to continue
+    user_input = input(
+        f"Are you sure you want to copy the content of {copy_from} to {copy_to}? (y/n) "
+    )
+    if user_input.lower() != "y":
+        log.info("Aborting...")
+        sys.exit(1)
+    # Get the content of the page
+    page_content = wiki.page_text(copy_from)
+    # Remove the category
+    page_content = page_content.replace("[[Category:Deployment]]", "")
+    if args.dry is False and page_content:
+        edit_result = wiki.edit(
+            title=copy_to,
+            text=page_content,
+            summary=f"Copying content of {copy_from} for testing",
+        )
+        return edit_result
+    else:
+        log.info("Either dry run, or page content is empty.")
+        return False
+
+
 def check_deployments(page_content: str) -> None:
     """Check deployments and update status if needed"""
     all_deployments = re_get_deployments.findall(page_content)
@@ -369,10 +405,12 @@ if __name__ == "__main__":
     # bool args
     parser.add_argument("-d", "--dry", help="Don't make any edits", action="store_true")
     parser.add_argument("-v", "--verbose", help="Be verbose", action="store_true")
-    parser.add_argument(
-        "--quirky", help="Kinda quirky feature to be honest...", action="store_true"
-    )
     parser.add_argument("--version", help="Version & source info", action="store_true")
+    parser.add_argument(
+        "--clear-cookies",
+        help="Clear any saved cookies from the jar",
+        action="store_true",
+    )
     parser.add_argument(
         "--ignore-duplicates", help="Ignore duplicate Gerrit IDs", action="store_true"
     )
@@ -399,12 +437,16 @@ if __name__ == "__main__":
         type=str,
         default=config.DEPLOYMENT_PAGE,
     )
+    # Hidden args
+    # Copy the content of the DEPLOYMENT_PAGE to the page provided (for testing)
     parser.add_argument(
         "--copy-for-testing",
-        help=f"Copy the content of {config.DEPLOYMENT_PAGE} to the page provided (really only useful for testing)",
+        help=argparse.SUPPRESS,
         type=str,
         metavar="PAGE",
     )
+    # Quirky feature
+    parser.add_argument("--quirky", help=argparse.SUPPRESS, action="store_true")
     args = parser.parse_args()
 
     # Logging levels
@@ -418,28 +460,30 @@ if __name__ == "__main__":
         if message:
             print(message)
         else:
-            print("We're all out of quirky messages")
+            print("Sorry, we're all out of quirky messages")
         sys.exit(0)
     if args.version:
         print(constants.VERSION_STRING)
+        sys.exit(0)
+    if args.clear_cookies:
+        log.info("Clearing cookies...")
+        wiki.clear_cookies()
         sys.exit(0)
     if args.dry:
         log.info("Running in dry mode, no edits will be made.")
     if args.copy_for_testing:
         log.info(
-            f"Copying content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}"
+            f"Copying content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}..."
         )
-        page_content = wiki.page_text(config.DEPLOYMENT_PAGE)
-        # Remove the category
-        page_content = page_content.replace("[[Category:Deployment]]", "")
-        if args.dry is False and page_content:
-            wiki.edit(
-                title=args.copy_for_testing,
-                text=page_content,
-                summary=f"Copying content of {config.DEPLOYMENT_PAGE} for testing",
+        copy_result = copy_for_testing(config.DEPLOYMENT_PAGE, args.copy_for_testing)
+        if copy_result:
+            log.info(
+                f"Successfully copied the content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}"
             )
         else:
-            log.info("Either dry run, or page content is empty.")
+            log.error(
+                f"Failed to copy the content of {config.DEPLOYMENT_PAGE} to {args.copy_for_testing}"
+            )
         sys.exit(0)
     if args.id:
         log.info(f"Checking deployment with Gerrit ID {args.id} only")

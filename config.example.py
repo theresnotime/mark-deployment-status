@@ -5,3 +5,4 @@ EDIT_SUMMARY = "[[User:TNTBot#Updating_backport_window_deployment_statuses|Autom
 USER_AGENT = (
     "TNTBot (https://meta.wikimedia.org/wiki/User:TNTBot) - mark-deployment-status"
 )
+COOKIE_JAR = "./.cookie_store"
