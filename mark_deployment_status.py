@@ -17,6 +17,10 @@ log = logging.getLogger("mark_deployment_status")
 formatter = logging.Formatter("[%(asctime)s] [%(name)s] [%(levelname)s]: %(message)s")
 log.addHandler(logging.StreamHandler(sys.stdout))
 log.handlers[0].setFormatter(formatter)
+sal_day_regex = re.compile(
+    r"<a class=\"day\" href=\"/production\?d=(?P<day>\d{4}-\d{2}-\d{2})\">",
+    re.IGNORECASE,
+)
 
 # Log in to the wiki
 try:
@@ -50,6 +54,31 @@ def get_change_status(change_id: str) -> None | str:
     return json_data["status"]
 
 
+def get_change_title(change_id: str) -> None | str:
+    """Get the title of a Gerrit change"""
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": config.USER_AGENT,
+    }
+    resp = requests.get(
+        f"https://{constants.GERRIT_URL}/r/changes/{change_id}",
+        headers=headers,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.content[4:]
+    json_data = json.loads(data)
+    return json_data["subject"]
+
+
+def get_sal_entry_day(sal_content: str) -> str:
+    """Get the date of the SAL entry"""
+    sal_day = sal_day_regex.search(sal_content)
+    if sal_day is not None:
+        return sal_day.group("day")
+    return ""
+
+
 def get_sal_entry_regex(title: str, gerrit_id: str) -> re.Pattern:
     """Return a prepared regex to find a SAL entry"""
     return re.compile(
@@ -58,7 +87,9 @@ def get_sal_entry_regex(title: str, gerrit_id: str) -> re.Pattern:
     )
 
 
-def did_change_get_deployed(gerrit_id: str, title: str) -> bool | re.Match[str]:
+def did_change_get_deployed(
+    gerrit_id: str, title: str, get_day: bool = False
+) -> bool | re.Match[str] | tuple[re.Match[str], str]:
     """Find out if a change was deployed by checking the SAL on toolforge"""
     headers = {
         "User-Agent": config.USER_AGENT,
@@ -69,6 +100,10 @@ def did_change_get_deployed(gerrit_id: str, title: str) -> bool | re.Match[str]:
     ).text
     in_log = get_sal_entry_regex(title, gerrit_id).search(sal_content)
     if in_log is not None:
+        if get_day:
+            sal_day = get_sal_entry_day(sal_content)
+            if sal_day:
+                return in_log, sal_day
         return in_log
     return False
 
@@ -149,6 +184,9 @@ def update_deployment_status(
             updated_deployment = deployment
             return updated_deployment
         else:
+            # Quick guard against this returning a tuple now that its been updated
+            if isinstance(was_deployed, tuple):
+                was_deployed = was_deployed[0]
             updated_deployment = re.sub(
                 r"status=.*?(\||}})", "status=done\\1", deployment
             )
@@ -506,13 +544,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--id",
         help="Just update the status of a single deployment (by gerrit id)",
-        type=int,
+        type=str,
+        metavar="12345",
     )
     parser.add_argument(
         "--page",
         help=f"Use a different page for deployments (default: {config.DEPLOYMENT_PAGE})",
         type=str,
         default=config.DEPLOYMENT_PAGE,
+    )
+    parser.add_argument(
+        "--get-change-status",
+        help="Get the patchset status of a change by Gerrit ID and quit",
+        type=str,
+        metavar="12345",
+    )
+    parser.add_argument(
+        "--get-deployment-status",
+        help="Get the deployment status of a change by Gerrit ID and quit",
+        type=str,
+        metavar="12345",
     )
     # Hidden args
     # Copy the content of the DEPLOYMENT_PAGE to the page provided (for testing)
@@ -538,6 +589,44 @@ if __name__ == "__main__":
             print(message)
         else:
             print("Sorry, we're all out of quirky messages")
+        sys.exit(0)
+    if args.get_change_status:
+        change_status = get_change_status(args.get_change_status)
+        if change_status:
+            print(f"Change status: {change_status}")
+        else:
+            print("Change not found")
+        sys.exit(0)
+    if args.get_deployment_status:
+        print(
+            f"Getting deployment status for [[gerrit:{args.get_deployment_status}]]..."
+        )
+        change_title = get_change_title(args.get_deployment_status)
+        change_status = get_change_status(args.get_deployment_status)
+        if change_title and change_status:
+            print(f"Change title: {change_title}")
+            print(f"Change status: {change_status}")
+            deployment_status = did_change_get_deployed(
+                args.get_deployment_status, change_title, get_day=True
+            )
+            if deployment_status:
+                if isinstance(deployment_status, tuple):
+                    deployment_match = deployment_status[0]
+                    deployment_day = deployment_status[1]
+                    print(
+                        f"Change deployed on {deployment_day} by {deployment_match.group('deployer')} (https://{constants.SAL_URL}{deployment_match.group('sal_link')})"
+                    )  # noqa: E501
+                elif isinstance(deployment_status, re.Match):
+                    print(
+                        f"Change deployed by {deployment_status.group('deployer')} (https://{constants.SAL_URL}{deployment_status.group('sal_link')})"
+                    )  # noqa: E501
+                else:
+                    print("Unknown deployment status")
+                    sys.exit(1)
+            else:
+                print("Change not deployed")
+        else:
+            print("Change not found")
         sys.exit(0)
     if args.version:
         print(constants.VERSION_STRING)
