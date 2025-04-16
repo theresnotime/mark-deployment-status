@@ -9,8 +9,11 @@ import random
 import re
 import requests
 import sys
+import time
 from pathlib import Path
 from pwiki.wiki import Wiki  # type: ignore
+from requests.adapters import HTTPAdapter
+from urllib3 import Retry
 
 args = argparse.Namespace(dry=False, verbose=False)
 log = logging.getLogger("mark_deployment_status")
@@ -37,38 +40,57 @@ except Exception as e:
 re_get_deployments = re.compile(r"{{deploy\|.*?}}", re.IGNORECASE)
 
 
-def get_change_status(change_id: str) -> None | str:
-    """Get the status of a Gerrit change"""
+def get_request_session(
+    extra_headers: dict[str, str] | None = None
+) -> requests.Session:
+    """Get a requests session object with the correct headers and settings"""
     headers = {
-        "Accept": "application/json",
         "User-Agent": config.USER_AGENT,
     }
-    resp = requests.get(
+    if extra_headers:
+        headers.update(extra_headers)
+
+    s = requests.Session()
+    s.headers.update(headers)
+    # Retry 3 times with a backoff factor of 0.5 seconds
+    retry = Retry(connect=3, backoff_factor=0.5)
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
+    return s
+
+
+def get_change_details(change_id: str):
+    """Get the details of a Gerrit change"""
+    session = get_request_session(
+        {
+            "Accept": "application/json",
+        }
+    )
+    resp = session.get(
         f"https://{constants.GERRIT_URL}/r/changes/{change_id}",
-        headers=headers,
+        timeout=6,
     )
     if resp.status_code != 200:
         return None
     data = resp.content[4:]
-    json_data = json.loads(data)
-    return json_data["status"]
+    return json.loads(data)
+
+
+def get_change_status(change_id: str) -> None | str:
+    """Get the status of a Gerrit change"""
+    change_details = get_change_details(change_id)
+    if change_details:
+        return change_details["status"]
+    return None
 
 
 def get_change_title(change_id: str) -> None | str:
     """Get the title of a Gerrit change"""
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": config.USER_AGENT,
-    }
-    resp = requests.get(
-        f"https://{constants.GERRIT_URL}/r/changes/{change_id}",
-        headers=headers,
-    )
-    if resp.status_code != 200:
-        return None
-    data = resp.content[4:]
-    json_data = json.loads(data)
-    return json_data["subject"]
+    change_details = get_change_details(change_id)
+    if change_details:
+        return change_details["subject"]
+    return None
 
 
 def get_sal_entry_day(sal_content: str) -> str:
@@ -91,12 +113,10 @@ def did_change_get_deployed(
     gerrit_id: str, title: str, get_day: bool = False
 ) -> bool | re.Match[str] | tuple[re.Match[str], str]:
     """Find out if a change was deployed by checking the SAL on toolforge"""
-    headers = {
-        "User-Agent": config.USER_AGENT,
-    }
-    sal_content = requests.get(
+    session = get_request_session()
+    sal_content = session.get(
         f"https://{constants.SAL_URL}/production?p=0&q={gerrit_id}&d=",
-        headers=headers,
+        timeout=6,
     ).text
     in_log = get_sal_entry_regex(title, gerrit_id).search(sal_content)
     if in_log is not None:
@@ -379,6 +399,8 @@ def check_deployments(page_content: str) -> None:
     for deployment in reversed(all_deployments):
         if count >= limit:
             break
+        # Slow down the requests to avoid hitting the API too hard
+        time.sleep(0.2 + random.uniform(0, 0.5))
         # Parse deployment
         deployment_obj = Backports.Deployment(deployment)
         gerrit_id = deployment_obj.gerrit_id
@@ -410,8 +432,12 @@ def check_deployments(page_content: str) -> None:
             pass
         seen_gerrit_ids.append(gerrit_id)
 
-        # get actual status
-        actual_status = get_change_status(gerrit_id)
+        try:
+            # get actual status
+            actual_status = get_change_status(gerrit_id)
+        except Exception as e:
+            log.error(f"[{gerrit_id}]: Error getting actual status: {e}")
+            sys.exit(1)
 
         if actual_status is None:
             log.info(f"[{gerrit_id}]: Could not get actual status for {gerrit_id}")
