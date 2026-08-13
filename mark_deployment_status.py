@@ -14,6 +14,7 @@ from pathlib import Path
 from pwiki.wiki import Wiki  # type: ignore
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
+from zoneinfo import ZoneInfo
 
 args = argparse.Namespace(dry=False, verbose=False)
 log = logging.getLogger("mark_deployment_status")
@@ -38,6 +39,24 @@ except Exception as e:
     log.error(e)
     exit(1)
 re_get_deployments = re.compile(r"{{deploy\|.*?}}", re.IGNORECASE)
+# The "when" parameter of a deployment calendar event card, e.g. "2026-08-13 00:00 SF"
+re_get_card_when = re.compile(r"\|\s*when\s*=\s*(?P<when>[^\n|]+)", re.IGNORECASE)
+re_parse_when = re.compile(
+    r"^(?P<year>\d+)-(?P<month>\d+)-(?P<day>\d+) "
+    r"(?P<hour>\d+):(?P<minute>\d+) (?P<tz>[A-Z]+)$"
+)
+# Named timezones use tzdata, others are fixed offsets from UTC (in hours).
+# This mirrors [[Module:Deployment schedule]] on wikitech.
+NAMED_TIMEZONES = {
+    "SF": "America/Los_Angeles",
+    "DE": "Europe/Berlin",
+}
+FIXED_TIMEZONES = {
+    "UTC": 0,
+    "Z": 0,
+    "PST": -8,
+    "PDT": -7,
+}
 
 
 def get_request_session(
@@ -378,15 +397,167 @@ def log_to_wiki(message: str) -> None:
             )
 
 
+def compute_section_anchor(when: str) -> None | str:
+    """Compute the section anchor (e.g. "deploycal-item-20260813T0700") for a card.
+
+    This mirrors the logic in [[Module:Deployment schedule]]: the anchor is the
+    card's "when" time converted to UTC.
+    """
+    match = re_parse_when.match(when.strip())
+    if match is None:
+        return None
+    tz_raw = match.group("tz")
+    if tz_raw in NAMED_TIMEZONES:
+        tzinfo: datetime.tzinfo = ZoneInfo(NAMED_TIMEZONES[tz_raw])
+    elif tz_raw in FIXED_TIMEZONES:
+        tzinfo = datetime.timezone(datetime.timedelta(hours=FIXED_TIMEZONES[tz_raw]))
+    else:
+        # Unknown timezone, cannot compute the anchor
+        return None
+    local_time = datetime.datetime(
+        int(match.group("year")),
+        int(match.group("month")),
+        int(match.group("day")),
+        int(match.group("hour")),
+        int(match.group("minute")),
+        tzinfo=tzinfo,
+    )
+    utc_time = local_time.astimezone(datetime.timezone.utc)
+    return f"deploycal-item-{utc_time.strftime('%Y%m%dT%H%M')}"
+
+
+def extract_event_cards(page_content: str) -> list[str]:
+    """Extract the wikitext of each deployment calendar event card.
+
+    Event cards contain nested templates, so brace matching (not regex) is used
+    to find where each card ends.
+    """
+    marker = "{{Deployment calendar event card"
+    cards: list[str] = []
+    idx = 0
+    while True:
+        start = page_content.find(marker, idx)
+        if start == -1:
+            break
+        depth = 0
+        i = start
+        length = len(page_content)
+        while i < length:
+            if page_content.startswith("{{", i):
+                depth += 1
+                i += 2
+            elif page_content.startswith("}}", i):
+                depth -= 1
+                i += 2
+                if depth == 0:
+                    break
+            else:
+                i += 1
+        cards.append(page_content[start:i])
+        idx = i
+    return cards
+
+
+def get_page_sections(page: str) -> list[dict]:
+    """Get the heading sections (anchor, level, byteoffset) of a page via the API"""
+    session = get_request_session({"Accept": "application/json"})
+    resp = session.get(
+        f"https://{constants.WIKITECH_WIKI}/w/api.php",
+        params={
+            "action": "parse",
+            "page": page,
+            "prop": "sections",
+            "format": "json",
+            "formatversion": "2",
+        },
+        timeout=6,
+    )
+    if resp.status_code != 200:
+        return []
+    return resp.json().get("parse", {}).get("sections", [])
+
+
+def find_heading_section(page_content: str, section_anchor: str) -> None | str:
+    """Return the wikitext of a heading section (e.g. a day) by its anchor, or None.
+
+    The section runs from its heading to the next heading of the same or a higher
+    level, so a day section includes all of its event cards.
+    """
+    sections = get_page_sections(config.DEPLOYMENT_PAGE)
+    target_index = None
+    for index, section in enumerate(sections):
+        if section.get("anchor") == section_anchor:
+            target_index = index
+            break
+    if target_index is None:
+        return None
+    target = sections[target_index]
+    if target.get("byteoffset") is None:
+        return None
+    start = int(target["byteoffset"])
+    level = int(target["level"])
+    # The section ends at the next heading of the same or a higher level
+    end = None
+    next_index = target_index + 1
+    for section in sections[next_index:]:
+        if section.get("byteoffset") is None:
+            continue
+        if int(section["level"]) <= level:
+            end = int(section["byteoffset"])
+            break
+    # byteoffset values are byte offsets into the UTF-8 wikitext
+    page_bytes = page_content.encode("utf-8")
+    section_bytes = page_bytes[start:end] if end is not None else page_bytes[start:]
+    return section_bytes.decode("utf-8")
+
+
+def find_deployment_section(page_content: str, section_anchor: str) -> None | str:
+    """Return the wikitext of the section whose anchor matches, or None.
+
+    Supports both per-card anchors (e.g. "deploycal-item-20260813T0700") and
+    heading anchors (e.g. "Monday,_August_10").
+    """
+    if section_anchor.startswith("deploycal-item-"):
+        for card in extract_event_cards(page_content):
+            when_match = re_get_card_when.search(card)
+            if when_match is None:
+                continue
+            if compute_section_anchor(when_match.group("when")) == section_anchor:
+                return card
+        return None
+    return find_heading_section(page_content, section_anchor)
+
+
 def check_deployments(page_content: str) -> None:
     """Check deployments and update status if needed"""
-    all_deployments = re_get_deployments.findall(page_content)
-    log.info(
-        f"Found {len(all_deployments)} total deployments on {config.DEPLOYMENT_PAGE}"
-    )
+    section_content: None | str = None
+    if args.deployment_section:
+        section_content = find_deployment_section(page_content, args.deployment_section)
+        if section_content is None:
+            log.error(
+                f"Could not find section '{args.deployment_section}' on {config.DEPLOYMENT_PAGE}"
+            )
+            if args.log_to_wiki:
+                log_to_wiki(
+                    f"Could not find section '{args.deployment_section}' on [[{config.DEPLOYMENT_PAGE}]]"
+                )
+            return
+        log.info(f"Restricting to section '{args.deployment_section}'")
+    if section_content is not None:
+        search_content = section_content
+        location = f"section '{args.deployment_section}' on {config.DEPLOYMENT_PAGE}"
+        wiki_location = (
+            f"section '{args.deployment_section}' on [[{config.DEPLOYMENT_PAGE}]]"
+        )
+    else:
+        search_content = page_content
+        location = config.DEPLOYMENT_PAGE
+        wiki_location = f"[[{config.DEPLOYMENT_PAGE}]]"
+    all_deployments = re_get_deployments.findall(search_content)
+    log.info(f"Found {len(all_deployments)} total deployments on {location}")
     if args.log_to_wiki:
         log_to_wiki(
-            f"Found {len(all_deployments)} total deployments on [[{config.DEPLOYMENT_PAGE}]]"
+            f"Found {len(all_deployments)} total deployments on {wiki_location}"
         )
     if len(all_deployments) == 0:
         log.info("No deployments found, exiting...")
@@ -419,7 +590,7 @@ def check_deployments(page_content: str) -> None:
             )
             continue
 
-        if args.id and int(gerrit_id) != args.id:
+        if args.id and int(gerrit_id) != int(args.id):
             continue
 
         # Check if we've already seen this Gerrit ID
@@ -477,21 +648,41 @@ def check_deployments(page_content: str) -> None:
             log_message = f"Out of {len(all_deployments)} total deployments on [[{config.DEPLOYMENT_PAGE}]], there are {len(deployments_to_update)} deployments (limited to {args.limit} changes) to update"
             if args.id:
                 log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+            if args.deployment_section:
+                log_message += f" (section: {args.deployment_section})"
             log_to_wiki(log_message)
-        new_page_content = page_content
         edit_summary = f"{config.EDIT_SUMMARY} [t:{len(all_deployments)}/u:{len(deployments_to_update)}/l:{args.limit}]"
         if args.id:
             edit_summary += f" (change ID: [[gerrit:{args.id}|{args.id}]])"
+        if section_content is not None:
+            edit_summary += f" (section: {args.deployment_section})"
         if args.verbose:
             log.info(f"Edit summary: {edit_summary}")
-        for deployment in deployments_to_update:
-            if args.verbose:
-                log.info(
-                    f"Deployment {deployment} will be updated to {deployments_to_update[deployment]}"
+        # When scoped to a section, only replace inside that section's wikitext so
+        # identical deployment strings in other sections are left untouched.
+        if section_content is not None:
+            new_section_content = section_content
+            for deployment in deployments_to_update:
+                if args.verbose:
+                    log.info(
+                        f"Deployment {deployment} will be updated to {deployments_to_update[deployment]}"
+                    )
+                new_section_content = new_section_content.replace(
+                    deployment, deployments_to_update[deployment]
                 )
-            new_page_content = new_page_content.replace(
-                deployment, deployments_to_update[deployment]
+            new_page_content = page_content.replace(
+                section_content, new_section_content
             )
+        else:
+            new_page_content = page_content
+            for deployment in deployments_to_update:
+                if args.verbose:
+                    log.info(
+                        f"Deployment {deployment} will be updated to {deployments_to_update[deployment]}"
+                    )
+                new_page_content = new_page_content.replace(
+                    deployment, deployments_to_update[deployment]
+                )
         if args.dry is False and new_page_content != page_content:
             log.info("Updating page...")
             edit_result = wiki.edit(
@@ -506,6 +697,8 @@ def check_deployments(page_content: str) -> None:
                     log_message = f'<span style="color:green;">Successfully</span> updated {len(deployments_to_update)} deployments (limited to {args.limit} changes) on [[{config.DEPLOYMENT_PAGE}]]'  # noqa: E702
                     if args.id:
                         log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+                    if args.deployment_section:
+                        log_message += f" (section: {args.deployment_section})"
                     log_to_wiki(log_message)
             else:
                 log.error("Failed to update page")
@@ -513,6 +706,8 @@ def check_deployments(page_content: str) -> None:
                     log_message = f'<span style="color:red;">Failed</span> to update {len(deployments_to_update)} deployments (limited to {args.limit} changes) on [[{config.DEPLOYMENT_PAGE}]]'  # noqa: E702
                     if args.id:
                         log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+                    if args.deployment_section:
+                        log_message += f" (section: {args.deployment_section})"
                     log_to_wiki(log_message)
         if args.debug:
             with open("logs/deployments.txt", "w") as f:
@@ -527,6 +722,8 @@ def main() -> None:
         log_message = f"'''Beginning''' run for [[{config.DEPLOYMENT_PAGE}]] (limited to {args.limit} changes)"
         if args.id:
             log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
+        if args.deployment_section:
+            log_message += f" (section: {args.deployment_section})"
         log_to_wiki(log_message)
     page_content = wiki.page_text(config.DEPLOYMENT_PAGE)
     check_deployments(page_content)
@@ -578,6 +775,13 @@ if __name__ == "__main__":
         help=f"Use a different page for deployments (default: {config.DEPLOYMENT_PAGE})",
         type=str,
         default=config.DEPLOYMENT_PAGE,
+    )
+    parser.add_argument(
+        "--deployment-section",
+        help="Only update deployments in this section (by card anchor id, e.g. "
+        "deploycal-item-20260813T0700, or heading anchor, e.g. Monday,_August_10)",
+        type=str,
+        metavar="SECTION",
     )
     parser.add_argument(
         "--get-change-status",
@@ -679,6 +883,8 @@ if __name__ == "__main__":
         sys.exit(0)
     if args.id:
         log.info(f"Checking deployment with Gerrit ID {args.id} only")
+    if args.deployment_section:
+        log.info(f"Checking deployments in section '{args.deployment_section}' only")
     if args.page != config.DEPLOYMENT_PAGE:
         config.DEPLOYMENT_PAGE = args.page
         log.debug(f"Using page {config.DEPLOYMENT_PAGE} for deployments")
