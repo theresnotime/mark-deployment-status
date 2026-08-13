@@ -724,6 +724,7 @@ def main() -> None:
             log_message += f" (will only modify item with change ID: [[gerrit:{args.id}|{args.id}]])"
         if args.deployment_section:
             log_message += f" (section: {args.deployment_section})"
+        log_message += f" (running v{constants.__version__})"
         log_to_wiki(log_message)
     page_content = wiki.page_text(config.DEPLOYMENT_PAGE)
     check_deployments(page_content)
